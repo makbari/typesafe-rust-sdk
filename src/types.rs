@@ -134,14 +134,14 @@ pub(crate) fn validate_questions(questions: &BTreeMap<String, Question>) -> Resu
 // ---------------------------------------------------------------------------
 
 /// A yes/no answer.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NoulAnswer {
     /// Probability of a yes answer, from zero to one.
     pub noul: f64,
 }
 
 /// A selected label and its probabilities.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ChoiceAnswer {
     pub choice: String,
     pub confidence: f64,
@@ -149,7 +149,7 @@ pub struct ChoiceAnswer {
 }
 
 /// An expected score with its rubric and probabilities.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ScoreAnswer {
     /// Expected score, which may fall between integer rubric levels.
     pub score: f64,
@@ -161,7 +161,7 @@ pub struct ScoreAnswer {
 }
 
 /// A box's edges as fractions of the image's height (`top`, `bottom`) and width (`left`, `right`).
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct BoxCoordinates {
     pub top: f64,
     pub bottom: f64,
@@ -170,7 +170,7 @@ pub struct BoxCoordinates {
 }
 
 /// The answer to a `box` question.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BoxAnswer {
     #[serde(rename = "box")]
     pub bounds: BoxCoordinates,
@@ -179,7 +179,7 @@ pub struct BoxAnswer {
 }
 
 /// An answer, identified on the wire by its `type` field.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Answer {
     Noul(NoulAnswer),
@@ -220,14 +220,14 @@ impl Answer {
 }
 
 /// Token usage for a request; `None` when the API did not report it.
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
 }
 
 /// Answers keyed by question name, with model and usage metadata.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SystemOneResult {
     pub model: String,
     pub answers: BTreeMap<String, Answer>,
@@ -235,7 +235,7 @@ pub struct SystemOneResult {
 }
 
 /// Metadata for an available model.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelCard {
     pub name: String,
     pub description: String,

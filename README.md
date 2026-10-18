@@ -98,6 +98,22 @@ Per-call: `client.system_one_with(req, &RequestOptions::default().header(...))`.
 `Error::Api(Box<ApiError>)` carries `kind`, `status`, `body`, `headers`, and `request_id`.
 Other variants: `Sdk` (bad input or config), `Connection`, `Timeout`.
 
+## CLI
+
+The `typesafe-cli` crate (in `cli/`, built on this SDK with `clap`) installs a `typesafe` binary:
+
+```sh
+cargo install --git https://github.com/makbari/typesafe-rust-sdk typesafe-cli
+
+echo "I was charged twice" | typesafe ask \
+  --choice "category:What is this about?=billing,technical,other" \
+  --noul "urgent=Is this urgent?"
+```
+
+Text comes from the argument, `--file PATH` (`-` is stdin), or piped stdin. Output is one line of
+JSON (`--pretty` prints aligned text). Exit code 0 is success, 2 is any error. Set
+`TYPESAFE_API_KEY`; see `typesafe ask --help` for `--model`, `--base-url`, `--timeout`.
+
 ## Differences from the JS SDK
 
 Not yet ported: logging and `TYPESAFE_LOG_LEVEL`, HTTP-date `Retry-After`, field-wise retry
