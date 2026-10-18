@@ -2,6 +2,7 @@
 name = "typesafe-sdk"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 description = "Unofficial Rust client for the TypeSafe AI API, ported from the JavaScript SDK."
 repository = "https://github.com/makbari/typesafe-rust-sdk"

@@ -70,7 +70,8 @@ let client = Client::builder().default_header("TypeSafe-Danger-Zone-Images", "tr
 the TS `withAssets` template tag. Attach the image with `.image(&img)`:
 
 ```rust
-let photo = Image::new(std::fs::read("returns/RMA-1042.jpg")?)?;
+let bytes = std::fs::read("returns/RMA-1042.jpg").expect("read image");
+let photo = Image::new(bytes)?;
 let req = SystemOneRequest::new(format!("The mug arrived chipped: {photo}"))
     .image(&photo)
     .question("damaged", noul(format!("Is the product in {photo} damaged?")));
@@ -94,7 +95,7 @@ Per-call: `client.system_one_with(req, &RequestOptions::default().header(...))`.
 
 ## Errors
 
-`Error::Api(ApiError)` carries `kind`, `status`, `body`, `headers`, and `request_id`.
+`Error::Api(Box<ApiError>)` carries `kind`, `status`, `body`, `headers`, and `request_id`.
 Other variants: `Sdk` (bad input or config), `Connection`, `Timeout`.
 
 ## Differences from the JS SDK
@@ -104,6 +105,8 @@ overrides. Browser guard and `fetch` injection do not apply (use `ClientBuilder:
 See the plan in the project notes for the roadmap.
 
 ## Development
+
+Requires Rust 1.88 or newer. Building needs a C toolchain (`rustls` crypto and `zstd`).
 
 ```sh
 cargo test

@@ -35,7 +35,7 @@ pub enum Compression {
 }
 
 /// Per-call options that override client settings.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct RequestOptions {
     /// Timeout per attempt; there is no total retry budget.
     pub timeout: Option<Duration>,
@@ -43,6 +43,18 @@ pub struct RequestOptions {
     // ponytail: whole-policy replace, not field-wise merge like the TS SDK.
     pub retry: Option<RetryPolicy>,
     headers: Vec<(String, String)>,
+}
+
+// Hand-written so header values (which may be credentials) never reach logs.
+impl fmt::Debug for RequestOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(n, _)| n.as_str()).collect();
+        f.debug_struct("RequestOptions")
+            .field("timeout", &self.timeout)
+            .field("retry", &self.retry)
+            .field("headers", &names)
+            .finish()
+    }
 }
 
 impl RequestOptions {
@@ -54,7 +66,7 @@ impl RequestOptions {
 }
 
 /// Builder for [`Client`]. Explicit values win over environment variables, then defaults.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct ClientBuilder {
     api_key: Option<String>,
     base_url: Option<String>,
@@ -64,6 +76,25 @@ pub struct ClientBuilder {
     default_headers: Vec<(String, String)>,
     compression: Compression,
     http: Option<reqwest::Client>,
+}
+
+// Hand-written so the API key and header values never reach logs.
+impl fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self
+            .default_headers
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        f.debug_struct("ClientBuilder")
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("base_url", &self.base_url)
+            .field("default_model", &self.default_model)
+            .field("timeout", &self.timeout)
+            .field("default_headers", &names)
+            .field("compression", &self.compression)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClientBuilder {
@@ -198,6 +229,9 @@ impl Client {
         request: SystemOneRequest,
         options: &RequestOptions,
     ) -> Result<SystemOneResult> {
+        if request.state.is_null() {
+            return Err(Error::sdk("State is required."));
+        }
         validate_questions(&request.questions)?;
         let payload = serde_json::json!({
             "state": request.state,
@@ -319,7 +353,7 @@ impl Client {
                 Ok((status, resp_headers, text)) => {
                     let error = ApiError::from_response(status, parse_body(&text), resp_headers);
                     if retries_left == 0 || !retry.http_statuses.contains(&status) {
-                        return Err(Error::Api(error));
+                        return Err(Error::Api(Box::new(error)));
                     }
                     retry.delay(attempt, Some(&error.headers))
                 }

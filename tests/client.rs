@@ -169,3 +169,36 @@ fn missing_api_key_is_an_error() {
     unsafe { std::env::remove_var("TYPESAFE_API_KEY") };
     assert!(matches!(Client::new(), Err(Error::Sdk(_))));
 }
+
+#[test]
+fn debug_output_hides_secrets() {
+    let b = Client::builder()
+        .api_key("sk-SECRET")
+        .default_header("x-token", "hdr-SECRET");
+    let o = typesafe_sdk::RequestOptions::default().header("x-token", "hdr-SECRET");
+    for text in [
+        format!("{b:?}"),
+        format!("{o:?}"),
+        format!("{:?}", b.build().unwrap()),
+    ] {
+        assert!(!text.contains("SECRET"), "{text}");
+    }
+}
+
+#[tokio::test]
+async fn null_state_is_rejected() {
+    let c = client("http://127.0.0.1:1");
+    let req = SystemOneRequest::new(serde_json::Value::Null).question("q", noul("x"));
+    assert!(matches!(c.system_one(req).await, Err(Error::Sdk(_))));
+}
+
+#[tokio::test]
+async fn absurd_retry_after_does_not_panic() {
+    let (url, seen) = serve(vec![
+        (429, "retry-after: 1e300\r\n", ""),
+        (200, "", OK_BODY),
+    ])
+    .await;
+    client(&url).system_one(request()).await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}

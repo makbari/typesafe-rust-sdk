@@ -14,7 +14,7 @@ pub enum Error {
     /// Invalid input or configuration, found before or after a request (TS `TypeSafeError`).
     Sdk(String),
     /// The server returned a non-2xx response after retries.
-    Api(ApiError),
+    Api(Box<ApiError>),
     /// The request or response body failed to travel (DNS, TLS, connection closed, ...).
     Connection(String),
     /// The full response did not arrive within the per-attempt timeout.

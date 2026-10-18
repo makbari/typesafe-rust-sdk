@@ -108,9 +108,9 @@ pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
         (v.is_finite() && v >= 0.0).then_some(v)
     };
     if let Some(ms) = num("retry-after-ms") {
-        return Some(Duration::from_secs_f64(ms / 1000.0));
+        return Duration::try_from_secs_f64(ms / 1000.0).ok();
     }
-    num("retry-after").map(Duration::from_secs_f64)
+    num("retry-after").and_then(|s| Duration::try_from_secs_f64(s).ok())
 }
 
 /// Uniform-ish value in `[0, 1)` from std's randomly seeded hasher.
@@ -174,6 +174,9 @@ mod tests {
             500
         );
         assert_eq!(parse_retry_after(&headers("retry-after", "-1")), None);
+        // Out-of-range values are ignored, not a panic.
+        assert_eq!(parse_retry_after(&headers("retry-after", "1e300")), None);
+        assert_eq!(parse_retry_after(&headers("retry-after-ms", "1e300")), None);
     }
 
     #[test]
