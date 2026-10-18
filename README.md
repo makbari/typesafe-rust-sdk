@@ -4,7 +4,7 @@ Unofficial Rust client for the [TypeSafe AI](https://typesafe.ai) API. It is a p
 official JavaScript SDK, [`typesafe-sdk-js`](https://github.com/typesafe-ai/typesafe-sdk-js)
 (ported from v0.7.0).
 
-Async, built on `reqwest` + `serde_json` + `zstd`. No other direct dependencies.
+Async, built on `reqwest`, `serde_json`, `zstd`, `log`, and `httpdate`. No other direct dependencies.
 
 ## Install
 
@@ -88,10 +88,21 @@ Images go out as `multipart/form-data`, once each.
 | `base_url` | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` |
 | `default_model` | `TYPESAFE_DEFAULT_MODEL` | `jev-latest` |
 | `timeout` | - | 10 s per attempt |
-| `retry` | - | 2 retries, 500 ms to 5 s backoff, 25% jitter; 408/429/5xx, connection errors, timeouts; honors `Retry-After` |
+| `retry` | - | 2 retries, 500 ms to 5 s backoff, 25% jitter; 408/429/5xx, connection errors, timeouts; honors `Retry-After` (seconds or HTTP date) |
 | `compression` | - | zstd for bodies of 1 KiB or more |
 
-Per-call: `client.system_one_with(req, &RequestOptions::default().header(...))`. Drop the future to cancel.
+Per-call: `client.system_one_with(req, &RequestOptions::default().timeout(..).retry(..).header(..))`.
+Retry settings merge field by field (`RetryOverrides`): per call over client over defaults.
+Drop the future to cancel.
+
+## Logging
+
+The SDK logs through the [`log`](https://docs.rs/log) facade; install any backend
+(`env_logger`, `tracing-log`, ...) to see it. Target is `typesafe_sdk`. `info` logs one line
+per attempt, retry, and failure; `debug` adds headers and bodies. Credential headers
+(`authorization`, `cookie`, ...) are masked, **bodies are not**, so keep `debug` off in production.
+The CLI installs a stderr logger and reads `TYPESAFE_LOG_LEVEL` (`debug`, `info`, `warn`, `error`,
+`off`; default `warn`).
 
 ## Errors
 
@@ -145,14 +156,14 @@ after them (failed records count as done; re-run only those lines to retry them)
 - `--noul NAME=INSTRUCTIONS` and `--choice "NAME[:INSTRUCTIONS]=LABEL,LABEL"` repeat freely.
 - `--questions FILE` loads a JSON object of questions in API format and works for every type,
   including `score` and `box`: `{"sev":{"type":"score","instructions":"How bad?","criteria":["low","high"]}}`.
-- `--model`, `--base-url`, `--timeout SECS` apply to both commands; `--concurrency` is 1 to 64 (default 4).
+- `--model`, `--base-url`, `--timeout SECS` apply to both commands; `TYPESAFE_LOG_LEVEL` turns on request logs on stderr; `--concurrency` is 1 to 64 (default 4).
 - Exit code: `0` success, `1` some batch records failed, `2` any other error.
 
 ## Differences from the JS SDK
 
-Not yet ported: logging and `TYPESAFE_LOG_LEVEL`, HTTP-date `Retry-After`, field-wise retry
-overrides. Browser guard and `fetch` injection do not apply (use `ClientBuilder::http_client`).
-See the plan in the project notes for the roadmap.
+Logging goes through the `log` facade instead of a `Logger` option, and `TYPESAFE_LOG_LEVEL`
+is read by the CLI only (a library cannot set a global log level). Browser guard and `fetch`
+injection do not apply (use `ClientBuilder::http_client`).
 
 ## Development
 

@@ -1,7 +1,7 @@
 use std::{
     collections::{HashSet, hash_map::RandomState},
     hash::{BuildHasher, Hasher},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use reqwest::header::HeaderMap;
@@ -46,6 +46,60 @@ impl Default for RetryPolicy {
             retry_connection_errors: true,
             retry_timeouts: true,
         }
+    }
+}
+
+/// Partial retry settings: `None` fields inherit from the client, then the SDK defaults.
+#[derive(Clone, Debug, Default)]
+pub struct RetryOverrides {
+    pub max_retries: Option<u32>,
+    pub backoff_initial: Option<Duration>,
+    pub backoff_max: Option<Duration>,
+    pub backoff_jitter: Option<f64>,
+    pub http_statuses: Option<HashSet<u16>>,
+    pub respect_retry_after: Option<bool>,
+    pub max_retry_after: Option<Duration>,
+    pub retry_connection_errors: Option<bool>,
+    pub retry_timeouts: Option<bool>,
+}
+
+impl From<RetryPolicy> for RetryOverrides {
+    fn from(p: RetryPolicy) -> Self {
+        Self {
+            max_retries: Some(p.max_retries),
+            backoff_initial: Some(p.backoff_initial),
+            backoff_max: Some(p.backoff_max),
+            backoff_jitter: Some(p.backoff_jitter),
+            http_statuses: Some(p.http_statuses),
+            respect_retry_after: Some(p.respect_retry_after),
+            max_retry_after: Some(p.max_retry_after),
+            retry_connection_errors: Some(p.retry_connection_errors),
+            retry_timeouts: Some(p.retry_timeouts),
+        }
+    }
+}
+
+impl RetryOverrides {
+    /// `base` with every set field replaced, validated.
+    pub(crate) fn apply(&self, base: &RetryPolicy) -> Result<RetryPolicy> {
+        let policy = RetryPolicy {
+            max_retries: self.max_retries.unwrap_or(base.max_retries),
+            backoff_initial: self.backoff_initial.unwrap_or(base.backoff_initial),
+            backoff_max: self.backoff_max.unwrap_or(base.backoff_max),
+            backoff_jitter: self.backoff_jitter.unwrap_or(base.backoff_jitter),
+            http_statuses: self
+                .http_statuses
+                .clone()
+                .unwrap_or_else(|| base.http_statuses.clone()),
+            respect_retry_after: self.respect_retry_after.unwrap_or(base.respect_retry_after),
+            max_retry_after: self.max_retry_after.unwrap_or(base.max_retry_after),
+            retry_connection_errors: self
+                .retry_connection_errors
+                .unwrap_or(base.retry_connection_errors),
+            retry_timeouts: self.retry_timeouts.unwrap_or(base.retry_timeouts),
+        };
+        policy.validate()?;
+        Ok(policy)
     }
 }
 
@@ -98,11 +152,12 @@ impl RetryPolicy {
     }
 }
 
-/// Parse `retry-after-ms` or `Retry-After` (seconds), preferring `retry-after-ms`.
-///
-/// ponytail: the HTTP-date form of `Retry-After` is not parsed (needs a date parser); it falls
-/// back to backoff. Add when the API is seen to send dates.
+/// Parse `retry-after-ms`, or `Retry-After` as seconds or an HTTP date; `retry-after-ms` wins.
 pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    parse_retry_after_at(headers, SystemTime::now())
+}
+
+fn parse_retry_after_at(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     let num = |name: &str| -> Option<f64> {
         let v: f64 = headers.get(name)?.to_str().ok()?.trim().parse().ok()?;
         (v.is_finite() && v >= 0.0).then_some(v)
@@ -110,7 +165,12 @@ pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     if let Some(ms) = num("retry-after-ms") {
         return Duration::try_from_secs_f64(ms / 1000.0).ok();
     }
-    num("retry-after").and_then(|s| Duration::try_from_secs_f64(s).ok())
+    if let Some(s) = num("retry-after") {
+        return Duration::try_from_secs_f64(s).ok();
+    }
+    let date = httpdate::parse_http_date(headers.get("retry-after")?.to_str().ok()?.trim()).ok()?;
+    // A date in the past means "retry now".
+    Some(date.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 /// Uniform-ish value in `[0, 1)` from std's randomly seeded hasher.
@@ -174,9 +234,64 @@ mod tests {
             500
         );
         assert_eq!(parse_retry_after(&headers("retry-after", "-1")), None);
+        assert_eq!(parse_retry_after(&headers("retry-after", "soon")), None);
         // Out-of-range values are ignored, not a panic.
         assert_eq!(parse_retry_after(&headers("retry-after", "1e300")), None);
         assert_eq!(parse_retry_after(&headers("retry-after-ms", "1e300")), None);
+    }
+
+    #[test]
+    fn retry_after_http_date() {
+        let h = headers("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT");
+        let at = |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        // 2026-10-21T07:28:00Z is 1792567680 seconds after the epoch.
+        assert_eq!(
+            parse_retry_after_at(&h, at(1_792_567_680 - 30)),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_retry_after_at(&h, at(1_792_567_680 + 30)),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            parse_retry_after_at(&headers("retry-after", "Wed, 99 Foo 2026"), at(0)),
+            None
+        );
+    }
+
+    #[test]
+    fn far_future_retry_after_date_falls_back_to_backoff() {
+        let p = RetryPolicy::default();
+        let h = headers("retry-after", "Fri, 31 Dec 9999 23:59:59 GMT");
+        assert_eq!(p.delay_with(0, Some(&h), 0.0).as_millis(), 500);
+    }
+
+    #[test]
+    fn overrides_merge_field_by_field() {
+        let base = RetryPolicy {
+            max_retries: 5,
+            ..Default::default()
+        };
+        let o = RetryOverrides {
+            backoff_initial: Some(Duration::from_millis(7)),
+            ..Default::default()
+        };
+        let merged = o.apply(&base).unwrap();
+        assert_eq!(
+            (merged.max_retries, merged.backoff_initial),
+            (5, Duration::from_millis(7))
+        );
+        let bad = RetryOverrides {
+            backoff_jitter: Some(2.0),
+            ..Default::default()
+        };
+        assert!(bad.apply(&base).is_err());
+        let full: RetryOverrides = RetryPolicy {
+            max_retries: 0,
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(full.apply(&base).unwrap().max_retries, 0);
     }
 
     #[test]

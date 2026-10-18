@@ -202,3 +202,75 @@ async fn absurd_retry_after_does_not_panic() {
     client(&url).system_one(request()).await.unwrap();
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
+
+struct Capture(Mutex<Vec<String>>);
+
+impl log::Log for Capture {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        self.0.lock().unwrap().push(format!("{}", record.args()));
+    }
+    fn flush(&self) {}
+}
+
+static CAPTURE: Capture = Capture(Mutex::new(Vec::new()));
+
+#[tokio::test]
+async fn logs_attempts_and_redacts_the_key() {
+    log::set_logger(&CAPTURE).ok();
+    log::set_max_level(log::LevelFilter::Debug);
+    let (url, _) = serve(vec![
+        (503, "x-typesafe-request-id: req_9\r\n", ""),
+        (200, "", OK_BODY),
+    ])
+    .await;
+    client(&url).system_one(request()).await.unwrap();
+    let all = CAPTURE.0.lock().unwrap().clone();
+    // Other tests share the capture, so keep only this request's lines, found by its unique id.
+    let tag = all
+        .iter()
+        .find(|l| l.contains("(request req_9)"))
+        .and_then(|l| l.split_whitespace().next())
+        .expect("a line for this request");
+    let lines = all
+        .iter()
+        .filter(|l| l.starts_with(&format!("{tag} ")))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(lines.contains("POST /v1/systemone <- 503"), "{lines}");
+    assert!(
+        lines.contains("retrying in") && lines.contains("(retry 1/2) after 503"),
+        "{lines}"
+    );
+    assert!(lines.contains("authorization: Bearer ***7890"), "{lines}");
+    assert!(lines.contains("<- 200"), "{lines}");
+    assert!(!lines.contains("sk-test-1234567890"), "{lines}");
+}
+
+#[tokio::test]
+async fn per_call_retry_overrides_merge_with_the_client_policy() {
+    let (url, seen) = serve(vec![(503, "", ""), (503, "", "")]).await;
+    let options = typesafe_sdk::RequestOptions::default().retry(typesafe_sdk::RetryOverrides {
+        max_retries: Some(1),
+        ..Default::default()
+    });
+    // The client's fast backoff still applies; only max_retries changed.
+    assert!(
+        client(&url)
+            .system_one_with(request(), &options)
+            .await
+            .is_err()
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn retry_after_http_date_in_the_past_retries_immediately() {
+    let date = "retry-after: Thu, 01 Jan 2026 00:00:00 GMT\r\n";
+    let (url, seen) = serve(vec![(429, date, ""), (200, "", OK_BODY)]).await;
+    client(&url).system_one(request()).await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
