@@ -13,7 +13,7 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 /// Descriptions of the yes and no outcomes of a `noul` question.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NoulCriteria {
     #[serde(rename = "true", skip_serializing_if = "Option::is_none")]
     pub yes: Option<Value>,
@@ -25,7 +25,7 @@ pub struct NoulCriteria {
 ///
 /// Instructions and descriptions are any JSON value: text, an object, an array, or `null`.
 /// Build them with [`noul`], [`choice`], [`score`], and [`locate`].
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Question {
     /// A yes/no question.
@@ -316,6 +316,24 @@ mod tests {
         let v = serde_json::to_value(noul("ok?")).unwrap();
         assert_eq!(v, json!({"type": "noul", "instructions": "ok?"}));
         assert_eq!(serde_json::to_value(locate("dog")).unwrap()["type"], "box");
+    }
+
+    #[test]
+    fn question_wire_format_roundtrips() {
+        let wire = json!({"type": "noul", "criteria": {"true": "is x"}});
+        let q: Question = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&q).unwrap(),
+            json!({"type": "noul", "instructions": null, "criteria": {"true": "is x"}})
+        );
+        for wire in [
+            json!({"type": "choice", "instructions": "c", "criteria": {"a": null}}),
+            json!({"type": "score", "instructions": "s", "criteria": ["lo", "hi"]}),
+            json!({"type": "box", "instructions": "dog"}),
+        ] {
+            let q: Question = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(q).unwrap(), wire);
+        }
     }
 
     #[test]

@@ -1,3 +1,5 @@
+mod batch;
+
 use std::{
     io::{IsTerminal, Read},
     path::PathBuf,
@@ -7,6 +9,8 @@ use std::{
 use clap::{Args, Parser, Subcommand};
 use serde_json::Value;
 use typesafe_sdk::{Answer, Client, Question, SystemOneRequest, SystemOneResult, choice, noul};
+
+use batch::BatchArgs;
 
 #[derive(Parser)]
 #[command(
@@ -26,6 +30,11 @@ enum Command {
     /// The text comes from STATE, from --file, or from stdin. The API key is read from
     /// TYPESAFE_API_KEY.
     Ask(AskArgs),
+    /// Answer the same questions for every line of a JSONL (or text) file.
+    ///
+    /// Results are written in input order, one JSON object per line, with the input beside
+    /// each answer. Exit code 1 means some records failed.
+    Batch(BatchArgs),
 }
 
 #[derive(Args)]
@@ -37,6 +46,20 @@ struct AskArgs {
     #[arg(short, long, value_name = "PATH", conflicts_with = "state")]
     file: Option<PathBuf>,
 
+    #[command(flatten)]
+    questions: QuestionArgs,
+
+    #[command(flatten)]
+    conn: ConnArgs,
+
+    /// Print aligned text instead of JSON.
+    #[arg(long)]
+    pretty: bool,
+}
+
+/// Where the questions come from. Combine the flags freely.
+#[derive(Args)]
+pub struct QuestionArgs {
     /// Yes/no question: NAME=INSTRUCTIONS (repeatable).
     #[arg(long, value_name = "NAME=INSTRUCTIONS", value_parser = parse_noul)]
     noul: Vec<(String, Question)>,
@@ -45,9 +68,32 @@ struct AskArgs {
     #[arg(long, value_name = "NAME[:INSTRUCTIONS]=LABELS", value_parser = parse_choice)]
     choice: Vec<(String, Question)>,
 
+    /// JSON file mapping question names to questions in API format, for any question type.
+    #[arg(short, long, value_name = "PATH")]
+    questions: Option<PathBuf>,
+}
+
+impl QuestionArgs {
+    pub fn questions(&self) -> Result<Vec<(String, Question)>, String> {
+        let mut all = Vec::new();
+        if let Some(path) = &self.questions {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let map: std::collections::BTreeMap<String, Question> = serde_json::from_str(&text)
+                .map_err(|e| format!("invalid questions file {}: {e}", path.display()))?;
+            all.extend(map);
+        }
+        all.extend(self.noul.iter().cloned().chain(self.choice.iter().cloned()));
+        Ok(all)
+    }
+}
+
+/// How to reach the API.
+#[derive(Args)]
+pub struct ConnArgs {
     /// Model to use. Default: TYPESAFE_DEFAULT_MODEL, then jev-latest.
     #[arg(short, long)]
-    model: Option<String>,
+    pub model: Option<String>,
 
     /// API root. Default: TYPESAFE_BASE_URL, then https://api.typesafe.ai.
     #[arg(long, value_name = "URL")]
@@ -56,10 +102,19 @@ struct AskArgs {
     /// Timeout per attempt, in seconds.
     #[arg(long, value_name = "SECS")]
     timeout: Option<u64>,
+}
 
-    /// Print aligned text instead of JSON.
-    #[arg(long)]
-    pretty: bool,
+impl ConnArgs {
+    pub fn client(&self) -> Result<Client, String> {
+        let mut builder = Client::builder();
+        if let Some(url) = &self.base_url {
+            builder = builder.base_url(url);
+        }
+        if let Some(secs) = self.timeout {
+            builder = builder.timeout(std::time::Duration::from_secs(secs));
+        }
+        builder.build().map_err(|e| e.to_string())
+    }
 }
 
 fn parse_noul(s: &str) -> Result<(String, Question), String> {
@@ -158,20 +213,12 @@ fn render_pretty(result: &SystemOneResult) -> String {
 
 async fn ask(args: AskArgs) -> Result<(), String> {
     let state = read_state(&args)?;
-    let mut builder = Client::builder();
-    if let Some(url) = &args.base_url {
-        builder = builder.base_url(url);
-    }
-    if let Some(secs) = args.timeout {
-        builder = builder.timeout(std::time::Duration::from_secs(secs));
-    }
-    let client = builder.build().map_err(|e| e.to_string())?;
-
+    let client = args.conn.client()?;
     let mut request = SystemOneRequest::new(state);
-    if let Some(model) = &args.model {
+    if let Some(model) = &args.conn.model {
         request = request.model(model);
     }
-    for (name, question) in args.noul.into_iter().chain(args.choice) {
+    for (name, question) in args.questions.questions()? {
         request = request.question(name, question);
     }
     let result = client
@@ -192,9 +239,13 @@ async fn ask(args: AskArgs) -> Result<(), String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let Command::Ask(args) = Cli::parse().command;
-    match ask(args).await {
-        Ok(()) => ExitCode::SUCCESS,
+    let outcome = match Cli::parse().command {
+        Command::Ask(args) => ask(args).await.map(|()| 0),
+        Command::Batch(args) => batch::run(args).await,
+    };
+    match outcome {
+        Ok(0) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::from(1),
         Err(message) => {
             eprintln!("error: {message}");
             ExitCode::from(2)

@@ -100,19 +100,53 @@ Other variants: `Sdk` (bad input or config), `Connection`, `Timeout`.
 
 ## CLI
 
-The `typesafe-cli` crate (in `cli/`, built on this SDK with `clap`) installs a `typesafe` binary:
+The `typesafe-cli` crate (in `cli/`, built on this SDK with `clap`) installs a `typesafe` binary.
+Set `TYPESAFE_API_KEY` first.
 
 ```sh
 cargo install --git https://github.com/makbari/typesafe-rust-sdk typesafe-cli
+```
 
+### `typesafe ask`: one piece of text
+
+```sh
 echo "I was charged twice" | typesafe ask \
   --choice "category:What is this about?=billing,technical,other" \
   --noul "urgent=Is this urgent?"
 ```
 
-Text comes from the argument, `--file PATH` (`-` is stdin), or piped stdin. Output is one line of
-JSON (`--pretty` prints aligned text). Exit code 0 is success, 2 is any error. Set
-`TYPESAFE_API_KEY`; see `typesafe ask --help` for `--model`, `--base-url`, `--timeout`.
+The text comes from the argument, `--file PATH` (`-` is stdin), or piped stdin. Output is one
+line of JSON; `--pretty` prints aligned text instead.
+
+### `typesafe batch`: every line of a file
+
+```sh
+typesafe batch tickets.jsonl --field body \
+  --choice "category=billing,technical,other" --noul "urgent=Is this urgent?" \
+  --out labeled.jsonl --concurrency 8
+```
+
+Each input line is a JSON value (the request state), a JSON object when you pick its text with
+`--field`, or plain text with `--text`. Blank lines are skipped. Results go to `--out` (or
+stdout), **in input order**, one object per line, with the input next to its answers:
+
+```json
+{"line":1,"input":"I was charged twice","model":"jev-latest","answers":{"urgent":{"type":"noul","noul":0.91}},"usage":{"input_tokens":12,"output_tokens":3}}
+{"line":2,"input":"boom","error":"400 bad input"}
+```
+
+A failed record gets an `error` line and does not stop the run; the SDK has already retried
+retryable failures. A summary goes to stderr. `--out` refuses to overwrite an existing file.
+After a crash or Ctrl-C, add `--resume` to keep the complete lines already written and continue
+after them (failed records count as done; re-run only those lines to retry them).
+
+### Questions, models, exit codes
+
+- `--noul NAME=INSTRUCTIONS` and `--choice "NAME[:INSTRUCTIONS]=LABEL,LABEL"` repeat freely.
+- `--questions FILE` loads a JSON object of questions in API format and works for every type,
+  including `score` and `box`: `{"sev":{"type":"score","instructions":"How bad?","criteria":["low","high"]}}`.
+- `--model`, `--base-url`, `--timeout SECS` apply to both commands; `--concurrency` is 1 to 64 (default 4).
+- Exit code: `0` success, `1` some batch records failed, `2` any other error.
 
 ## Differences from the JS SDK
 

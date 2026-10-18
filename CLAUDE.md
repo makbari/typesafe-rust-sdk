@@ -15,7 +15,7 @@ Rust port of the TypeScript SDK https://github.com/typesafe-ai/typesafe-sdk-js (
 - `src/assets.rs`: `Image`, reference scan, multipart encoding
 - `src/retry.rs`: `RetryPolicy`, delay, `Retry-After`
 - `src/error.rs`: `Error`, `ApiError`, message extraction
-- `cli/`: workspace member `typesafe-cli`, binary `typesafe` (`clap` derive; `ask` subcommand)
+- `cli/`: workspace member `typesafe-cli`, binary `typesafe` (`clap` derive; `ask` and `batch` subcommands, `cli/src/batch.rs`)
 - `tests/client.rs`: end-to-end tests against a local TCP mock server
 
 ## Commands
