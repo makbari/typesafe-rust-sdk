@@ -260,6 +260,13 @@ mod tests {
     }
 
     #[test]
+    fn far_future_retry_after_date_falls_back_to_backoff() {
+        let p = RetryPolicy::default();
+        let h = headers("retry-after", "Fri, 31 Dec 9999 23:59:59 GMT");
+        assert_eq!(p.delay_with(0, Some(&h), 0.0).as_millis(), 500);
+    }
+
+    #[test]
     fn overrides_merge_field_by_field() {
         let base = RetryPolicy {
             max_retries: 5,

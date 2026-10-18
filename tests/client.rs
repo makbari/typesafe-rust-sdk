@@ -227,14 +227,26 @@ async fn logs_attempts_and_redacts_the_key() {
     ])
     .await;
     client(&url).system_one(request()).await.unwrap();
-    let lines = CAPTURE.0.lock().unwrap().join("\n");
+    let all = CAPTURE.0.lock().unwrap().clone();
+    // Other tests share the capture, so keep only this request's lines, found by its unique id.
+    let tag = all
+        .iter()
+        .find(|l| l.contains("(request req_9)"))
+        .and_then(|l| l.split_whitespace().next())
+        .expect("a line for this request");
+    let lines = all
+        .iter()
+        .filter(|l| l.starts_with(&format!("{tag} ")))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(lines.contains("POST /v1/systemone <- 503"), "{lines}");
-    assert!(lines.contains("(request req_9)"), "{lines}");
     assert!(
         lines.contains("retrying in") && lines.contains("(retry 1/2) after 503"),
         "{lines}"
     );
     assert!(lines.contains("authorization: Bearer ***7890"), "{lines}");
+    assert!(lines.contains("<- 200"), "{lines}");
     assert!(!lines.contains("sk-test-1234567890"), "{lines}");
 }
 
