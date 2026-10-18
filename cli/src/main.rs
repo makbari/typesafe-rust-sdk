@@ -1,4 +1,5 @@
 mod batch;
+mod logger;
 
 use std::{
     io::{IsTerminal, Read},
@@ -239,7 +240,12 @@ async fn ask(args: AskArgs) -> Result<(), String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    let outcome = match Cli::parse().command {
+    let cli = Cli::parse();
+    if let Err(message) = logger::init() {
+        eprintln!("error: {message}");
+        return ExitCode::from(2);
+    }
+    let outcome = match cli.command {
         Command::Ask(args) => ask(args).await.map(|()| 0),
         Command::Batch(args) => batch::run(args).await,
     };

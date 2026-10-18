@@ -1,4 +1,11 @@
-use std::{fmt, time::Duration};
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use reqwest::{
     Method,
@@ -10,7 +17,8 @@ use serde_json::Value;
 use crate::{
     assets::{Body, encode_request},
     error::{ApiError, Error, Result},
-    retry::{DEFAULT_TIMEOUT, RetryPolicy},
+    logging::redacted_headers,
+    retry::{DEFAULT_TIMEOUT, RetryOverrides, RetryPolicy},
     types::{ModelCard, SystemOneRequest, SystemOneResult, validate_questions},
 };
 
@@ -39,9 +47,8 @@ pub enum Compression {
 pub struct RequestOptions {
     /// Timeout per attempt; there is no total retry budget.
     pub timeout: Option<Duration>,
-    /// Replaces the client's retry policy for this call.
-    // ponytail: whole-policy replace, not field-wise merge like the TS SDK.
-    pub retry: Option<RetryPolicy>,
+    /// Retry settings for this call; unset fields inherit from the client.
+    pub retry: Option<RetryOverrides>,
     headers: Vec<(String, String)>,
 }
 
@@ -58,6 +65,18 @@ impl fmt::Debug for RequestOptions {
 }
 
 impl RequestOptions {
+    /// Timeout per attempt for this call.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Retry settings for this call; unset fields inherit from the client.
+    pub fn retry(mut self, retry: impl Into<RetryOverrides>) -> Self {
+        self.retry = Some(retry.into());
+        self
+    }
+
     /// Add a header, merged over the client's default headers.
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
@@ -72,7 +91,7 @@ pub struct ClientBuilder {
     base_url: Option<String>,
     default_model: Option<String>,
     timeout: Option<Duration>,
-    retry: Option<RetryPolicy>,
+    retry: Option<RetryOverrides>,
     default_headers: Vec<(String, String)>,
     compression: Compression,
     http: Option<reqwest::Client>,
@@ -118,8 +137,9 @@ impl ClientBuilder {
         self.timeout = Some(v);
         self
     }
-    pub fn retry(mut self, v: RetryPolicy) -> Self {
-        self.retry = Some(v);
+    /// Retry settings; unset fields keep the SDK defaults. Accepts a `RetryPolicy` too.
+    pub fn retry(mut self, v: impl Into<RetryOverrides>) -> Self {
+        self.retry = Some(v.into());
         self
     }
     /// Additional header on every request; per-call headers take precedence.
@@ -157,8 +177,10 @@ impl ClientBuilder {
             .unwrap_or_else(|| DEFAULT_MODEL.into());
         let timeout = self.timeout.unwrap_or(DEFAULT_TIMEOUT);
         check_timeout(timeout)?;
-        let retry = self.retry.unwrap_or_default();
-        retry.validate()?;
+        let retry = self
+            .retry
+            .unwrap_or_default()
+            .apply(&RetryPolicy::default())?;
         let mut default_headers = HeaderMap::new();
         merge_headers(&mut default_headers, &self.default_headers)?;
         Ok(Client {
@@ -170,6 +192,7 @@ impl ClientBuilder {
             retry,
             default_headers,
             compression: self.compression,
+            request_count: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -185,6 +208,8 @@ pub struct Client {
     retry: RetryPolicy,
     default_headers: HeaderMap,
     compression: Compression,
+    /// Numbers requests so concurrent calls can be told apart in logs.
+    request_count: Arc<AtomicU64>,
 }
 
 // Hand-written so the API key never reaches logs.
@@ -270,14 +295,24 @@ impl Client {
     ) -> Result<T> {
         let timeout = options.timeout.unwrap_or(self.timeout);
         check_timeout(timeout)?;
+        let merged;
         let retry = match &options.retry {
-            Some(r) => {
-                r.validate()?;
-                r
+            Some(o) => {
+                merged = o.apply(&self.retry)?;
+                &merged
             }
             None => &self.retry,
         };
         let url = format!("{}{path}", self.base_url);
+
+        // What debug logs show of the body: the payload before compression.
+        let debug_body = log::log_enabled!(log::Level::Debug).then(|| match &body {
+            None => String::new(),
+            Some(b) if b.content_type == "application/json" => {
+                String::from_utf8_lossy(&b.bytes).into_owned()
+            }
+            Some(b) => format!("<{} bytes of {}>", b.bytes.len(), b.content_type),
+        });
 
         // Compressed once and sent as-is on every attempt.
         let (content_type, bytes, encoded) = match body {
@@ -323,6 +358,10 @@ impl Client {
             headers.insert("content-encoding", HeaderValue::from_static("zstd"));
         }
 
+        let tag = format!(
+            "#{} {method} {path}",
+            self.request_count.fetch_add(1, Ordering::Relaxed) + 1
+        );
         let mut attempt = 0u32;
         loop {
             let retries_left = retry.max_retries.saturating_sub(attempt);
@@ -339,29 +378,61 @@ impl Client {
                 req = req.body(b.clone());
             }
 
-            let wait = match attempt_once(req, timeout).await {
+            log::debug!(
+                "{tag} -> {url} headers: [{}] body: {}",
+                redacted_headers(&headers),
+                debug_body.as_deref().unwrap_or("")
+            );
+            let started = Instant::now();
+            let (wait, reason) = match attempt_once(req, timeout).await {
                 Err(e) => {
+                    log::info!(
+                        "{tag} failed after {}ms: {e}",
+                        started.elapsed().as_millis()
+                    );
                     if retries_left == 0 || !retry.retries_error(&e) {
                         return Err(e);
                     }
-                    retry.delay(attempt, None)
+                    (retry.delay(attempt, None), e.to_string())
                 }
-                Ok((status, _, text)) if (200..300).contains(&status) => {
+                Ok((status, resp_headers, text)) if (200..300).contains(&status) => {
+                    log_response(&tag, status, &resp_headers, started);
+                    log::debug!("{tag} <- body: {text}");
                     return serde_json::from_str(&text)
                         .map_err(|e| Error::sdk(format!("Unexpected response from {path}: {e}")));
                 }
                 Ok((status, resp_headers, text)) => {
+                    log_response(&tag, status, &resp_headers, started);
+                    log::debug!("{tag} <- error body: {text}");
                     let error = ApiError::from_response(status, parse_body(&text), resp_headers);
                     if retries_left == 0 || !retry.http_statuses.contains(&status) {
                         return Err(Error::Api(Box::new(error)));
                     }
-                    retry.delay(attempt, Some(&error.headers))
+                    (
+                        retry.delay(attempt, Some(&error.headers)),
+                        status.to_string(),
+                    )
                 }
             };
+            log::info!(
+                "{tag} retrying in {}ms (retry {}/{}) after {reason}",
+                wait.as_millis(),
+                attempt + 1,
+                attempt + retries_left
+            );
             tokio::time::sleep(wait).await;
             attempt += 1;
         }
     }
+}
+
+fn log_response(tag: &str, status: u16, headers: &HeaderMap, started: Instant) {
+    let id = crate::error::request_id_from(headers)
+        .map_or(String::new(), |id| format!(" (request {id})"));
+    log::info!(
+        "{tag} <- {status} in {}ms{id}",
+        started.elapsed().as_millis()
+    );
 }
 
 /// One HTTP round trip, including body delivery, bounded by the reqwest timeout.

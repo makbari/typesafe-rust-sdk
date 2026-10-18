@@ -27,6 +27,7 @@
 mod assets;
 mod client;
 mod error;
+mod logging;
 mod retry;
 mod types;
 
@@ -35,7 +36,7 @@ pub use client::{
     Client, ClientBuilder, Compression, DEFAULT_BASE_URL, DEFAULT_MODEL, RequestOptions,
 };
 pub use error::{ApiError, ApiErrorKind, Error, Result};
-pub use retry::RetryPolicy;
+pub use retry::{RetryOverrides, RetryPolicy};
 pub use types::{
     Answer, BoxAnswer, BoxCoordinates, ChoiceAnswer, ModelCard, NoulAnswer, NoulCriteria, Question,
     ScoreAnswer, SystemOneRequest, SystemOneResult, Usage, choice, locate, noul, score,
